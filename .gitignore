@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+.env
+*.log
+.npm-cache/
+.firebase-config/
+.firebase-cache/
+backend/credentials/
