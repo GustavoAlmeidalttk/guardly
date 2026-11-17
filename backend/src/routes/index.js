@@ -3,6 +3,7 @@ import * as testes from '../controllers/testesController.js';
 import * as cenarios from '../controllers/cenariosController.js';
 import * as execucoes from '../controllers/execucoesController.js';
 import * as security from '../controllers/securityController.js';
+import * as suggestions from '../controllers/suggestionsController.js';
 import { asyncHandler } from '../middlewares/errors.js';
 import { validateAnalysis } from '../middlewares/validateAnalysis.js';
 
@@ -13,6 +14,10 @@ router.post('/tests', asyncHandler(testes.store));
 router.get('/tests/:id', asyncHandler(testes.show));
 router.get('/tests/:testId/scenarios', asyncHandler(cenarios.index));
 router.post('/tests/:testId/scenarios', asyncHandler(cenarios.store));
+router.put('/tests/:testId/scenarios/:scenarioId/risks', asyncHandler(cenarios.linkRisks));
+router.get('/tests/:testId/security-suggestions', asyncHandler(suggestions.index));
+router.post('/tests/:testId/security-suggestions', asyncHandler(suggestions.generate));
+router.patch('/tests/:testId/security-suggestions/:suggestionId', asyncHandler(suggestions.update));
 router.get('/tests/:testId/scenarios/:scenarioId/executions', asyncHandler(execucoes.index));
 router.post('/tests/:testId/scenarios/:scenarioId/executions', asyncHandler(execucoes.start));
 router.patch('/tests/:testId/scenarios/:scenarioId/executions/:executionId', asyncHandler(execucoes.finish));

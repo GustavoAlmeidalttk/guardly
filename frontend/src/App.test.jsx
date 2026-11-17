@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 
 const mock = vi.hoisted(() => ({
   listarTestes: vi.fn(), obterTeste: vi.fn(), criarTeste: vi.fn(), listarCenarios: vi.fn(), criarCenario: vi.fn(),
-  iniciarExecucao: vi.fn(), finalizarExecucao: vi.fn(), listarExecucoes: vi.fn()
+  iniciarExecucao: vi.fn(), finalizarExecucao: vi.fn(), listarExecucoes: vi.fn(), associarRiscos: vi.fn(), listarSugestoes: vi.fn(), gerarSugestoes: vi.fn(), revisarSugestao: vi.fn()
 }));
 vi.mock('./services/api.js', () => ({ api: mock }));
 
@@ -20,6 +20,7 @@ beforeEach(() => {
   mock.listarTestes.mockResolvedValue([]);
   mock.listarCenarios.mockResolvedValue([]);
   mock.listarExecucoes.mockResolvedValue([]);
+  mock.listarSugestoes.mockResolvedValue([]);
 });
 
 describe('TES-55/56/61/62: execução manual e histórico', () => {
@@ -140,6 +141,32 @@ describe('TES-36/37: cenários e alerta', () => {
     expect(mock.criarCenario).toHaveBeenCalledWith(teste.id, expect.objectContaining({ nome: 'Conta bloqueada', confirmarDuplicidade: false }));
   });
 
+  it('permite associar riscos analisados ao cenário', async () => {
+    const user = userEvent.setup();
+    mock.associarRiscos.mockResolvedValue({ analysisId: 'analysis-1' });
+    await openDetail(user);
+    await user.type(screen.getByLabelText('Análise para vincular'), 'analysis-1');
+    await user.type(screen.getByLabelText('IDs dos riscos'), 'risk-1, risk-2');
+    await user.click(screen.getByRole('button', { name: 'Associar riscos' }));
+    await waitFor(() => expect(mock.associarRiscos).toHaveBeenCalledWith(teste.id, cenario.id, { analysisId: 'analysis-1', riskIds: ['risk-1', 'risk-2'] }));
+  });
+
+  it('exibe alerta para cenário sensível sem avaliação e oculta após avaliação válida', async () => {
+    const user = userEvent.setup();
+    mock.listarTestes.mockResolvedValue([teste]);
+    mock.listarCenarios.mockResolvedValue([{ ...cenario, sensitiveScenario: true, riskPriority: 'critica', priorityReason: 'Risco crítico associado.' }]);
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: /Teste de autenticação/ }));
+    expect(await screen.findByRole('status')).toHaveTextContent(/cenário relacionado a funcionalidade sensível sem avaliação válida/i);
+    expect(screen.getByText('Prioridade: Crítica')).toBeInTheDocument();
+    cleanup();
+    mock.listarCenarios.mockResolvedValue([{ ...cenario, sensitiveScenario: true, riskPriority: 'sem_avaliacao', riskAssessment: { analysisId: 'analysis-valid', risks: [] } }]);
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: /Teste de autenticação/ }));
+    await screen.findByText('Senha inválida');
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
   it('mostra alerta de duplicidade e cancela sem reenviar', async () => {
     const user = userEvent.setup();
     mock.criarCenario.mockRejectedValue({ code: 'DUPLICATE_SCENARIO', message: 'Nome duplicado' });
@@ -166,5 +193,21 @@ describe('TES-36/37: cenários e alerta', () => {
     expect(mock.criarCenario).toHaveBeenLastCalledWith(teste.id, expect.objectContaining({ confirmarDuplicidade: true }));
     expect(await screen.findByText('Cenário cadastrado com sucesso.')).toBeInTheDocument();
     expect(screen.getAllByText('Senha inválida')).toHaveLength(2);
+  });
+
+  it('gera e aceita sugestão de segurança com passos revisados', async () => {
+    const user = userEvent.setup();
+    const suggestion = { id: 'suggestion-1', risk: { id: 'risk-1', type: 'Manipulação de credenciais', severity: 'alta', description: 'Credencial sensível.' }, status: 'pendente', scenarioDraft: { nome: 'Rejeitar credencial inválida', descricao: 'Baseado no risco', preCondicoes: 'Ambiente de teste', passos: 'Rejeitar token incorreto', resultadoEsperado: 'Acesso negado' } };
+    await openDetail(user);
+    await user.type(screen.getByLabelText('ID da análise de código'), 'analysis-1');
+    mock.gerarSugestoes.mockResolvedValue([suggestion]);
+    mock.listarSugestoes.mockResolvedValue([suggestion]);
+    await user.click(screen.getByRole('button', { name: 'Gerar sugestões' }));
+    expect(await screen.findByText('Rejeitar credencial inválida')).toBeInTheDocument();
+    const steps = screen.getByLabelText('Passos sugeridos');
+    await user.clear(steps);
+    await user.type(steps, 'Testar credencial inválida após revisão');
+    await user.click(screen.getByRole('button', { name: 'Aceitar sugestão' }));
+    await waitFor(() => expect(mock.revisarSugestao).toHaveBeenCalledWith(teste.id, suggestion.id, expect.objectContaining({ status: 'aceita', scenario: expect.objectContaining({ passos: 'Testar credencial inválida após revisão' }) })));
   });
 });

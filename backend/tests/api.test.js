@@ -120,6 +120,66 @@ describe('TES-35/37: cenários e duplicidade', () => {
     expect((await request(app).post(`/api/tests/${randomUUID()}/scenarios`).send({ nome: 'Caso' })).status).toBe(404);
     expect(scenarioCount()).toBe(0);
   });
+
+  it('associa riscos persistidos e calcula prioridade ao recarregar cenários', async () => {
+    const teste = await request(app).post('/api/tests').send({ nome: 'Segurança de login' });
+    const scenario = await request(app).post(`/api/tests/${teste.body.id}/scenarios`).send({ nome: 'Validar autenticação' });
+    const analysisId = randomUUID();
+    state.docs.set(`analisesSeguranca/${analysisId}`, {
+      analysisId, analyzedAt: new Date().toISOString(), risks: [{ id: 'risk-1', type: 'Execução dinâmica', severity: 'alta', description: 'Uso detectado', location: { line: 4 } }], sensitiveFeatures: []
+    });
+    const saved = await request(app).put(`/api/tests/${teste.body.id}/scenarios/${scenario.body.id}/risks`).send({ analysisId, riskIds: ['risk-1'] });
+    expect(saved.status).toBe(200);
+    expect((await request(app).get(`/api/tests/${teste.body.id}/scenarios`)).body[0]).toMatchObject({ riskPriority: 'alta', riskAssessment: { analysisId, risks: [{ id: 'risk-1' }] } });
+  });
+
+  it('ordena criticidade antes da quantidade de riscos, desempata por nome e alerta cenário sensível sem avaliação', async () => {
+    const teste = await request(app).post('/api/tests').send({ nome: 'Prioridade' });
+    const create = async (nome) => (await request(app).post(`/api/tests/${teste.body.id}/scenarios`).send({ nome })).body;
+    const critical = await create('Crítico');
+    const highB = await create('B alto');
+    const highA = await create('A alto');
+    const manyMedium = await create('Z vários médios');
+    await create('Login sem avaliação');
+    await create('Upload de arquivo sem avaliação');
+    await create('Rota comum');
+    const analysisId = randomUUID();
+    const risks = [
+      { id: 'critical', severity: 'critica' }, { id: 'high-a', severity: 'alta' },
+      { id: 'high-b', severity: 'alta' }, ...Array.from({ length: 5 }, (_, i) => ({ id: `medium-${i}`, severity: 'media' }))
+    ].map((risk) => ({ ...risk, type: 'Risco técnico', description: 'Achado verificado' }));
+    state.docs.set(`analisesSeguranca/${analysisId}`, { analysisId, analyzedAt: new Date().toISOString(), risks, sensitiveFeatures: [] });
+    const link = (scenario, ids) => request(app).put(`/api/tests/${teste.body.id}/scenarios/${scenario.id}/risks`).send({ analysisId, riskIds: ids });
+    await link(critical, ['critical']); await link(highB, ['high-b']); await link(highA, ['high-a']);
+    await link(manyMedium, risks.filter((risk) => risk.severity === 'media').map((risk) => risk.id));
+    const scenarios = (await request(app).get(`/api/tests/${teste.body.id}/scenarios`)).body;
+    expect(scenarios.map((scenario) => scenario.nome)).toEqual(['Crítico', 'A alto', 'B alto', 'Z vários médios', 'Login sem avaliação', 'Rota comum', 'Upload de arquivo sem avaliação']);
+    expect(scenarios[0].riskPriority).toBe('critica');
+    expect(scenarios[3].riskScore).toBeGreaterThan(scenarios[1].riskScore);
+    expect(scenarios[4]).toMatchObject({ sensitiveScenario: true, riskPriority: 'sem_avaliacao' });
+    expect(scenarios[5].sensitiveScenario).toBe(false);
+    expect(scenarios[6].sensitiveScenario).toBe(true);
+  });
+
+  it('gera sugestões rastreáveis, evita duplicidade e aceita uma revisão como cenário', async () => {
+    const teste = await request(app).post('/api/tests').send({ nome: 'API protegida' });
+    const analysisId = randomUUID();
+    state.docs.set(`analisesSeguranca/${analysisId}`, { analysisId, risks: [{ id: 'risk-1', type: 'Manipulação de credenciais', severity: 'alta', description: 'Credencial em uso' }, { id: 'risk-2', type: 'Execução de comando', severity: 'alta', description: 'Comando analisado' }] });
+    const path = `/api/tests/${teste.body.id}/security-suggestions`;
+    const generated = await request(app).post(path).send({ analysisId });
+    expect(generated.status).toBe(201);
+    expect(generated.body).toHaveLength(2);
+    expect((await request(app).post(path).send({ analysisId })).body).toHaveLength(2);
+    const suggestion = generated.body[0];
+    const accepted = await request(app).patch(`${path}/${suggestion.id}`).send({ status: 'aceita', scenario: { ...suggestion.scenarioDraft, passos: 'Revisado: rejeitar token inválido.' } });
+    expect(accepted.status).toBe(200);
+    expect(accepted.body).toMatchObject({ status: 'aceita', scenarioId: expect.any(String) });
+    expect((await request(app).get(`/api/tests/${teste.body.id}/scenarios`)).body[0].passos).toBe('Revisado: rejeitar token inválido.');
+    expect((await request(app).get(`/api/tests/${teste.body.id}/scenarios`)).body[0]).toMatchObject({ origemCriacao: 'sugestao_automatica', sugestaoSegurancaId: suggestion.id, riskAssessment: { analysisId, risks: [{ id: 'risk-1' }] } });
+    expect((await request(app).patch(`${path}/${suggestion.id}`).send({ status: 'descartada' })).status).toBe(409);
+    const discarded = await request(app).patch(`${path}/${generated.body[1].id}`).send({ status: 'descartada' });
+    expect(discarded.body.status).toBe('descartada');
+  });
 });
 
 describe('TES-54/56/60/62: execução e histórico', () => {

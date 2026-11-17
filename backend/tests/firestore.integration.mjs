@@ -8,6 +8,8 @@ if (!/^(127\.0\.0\.1|localhost):\d+$/.test(process.env.FIRESTORE_EMULATOR_HOST |
 }
 
 const { app } = await import('../src/app.js');
+// This integration exercises Firestore writes using a fixed, controlled snippet.
+process.env.ANALYZER_MODE = 'process-dev';
 const unique = Date.now().toString();
 
 const teste = await request(app).post('/api/tests').send({ nome: `Integração Firestore ${unique}` });
@@ -23,6 +25,16 @@ const first = await request(app).post(scenarioUrl).send({
 });
 assert.equal(first.status, 201);
 assert.equal(first.body.testeId, testId);
+
+const analysis = await request(app).post('/api/security/analyze').send({ code: 'eval(userInput);', generatedByAI: true, aiTool: 'Teste de integração' });
+assert.equal(analysis.status, 200);
+assert.equal(analysis.body.generatedByAI, true);
+assert.equal(analysis.body.risks[0].severity, 'critica');
+const linked = await request(app).put(`/api/tests/${testId}/scenarios/${first.body.id}/risks`).send({
+  analysisId: analysis.body.analysisId,
+  riskIds: [analysis.body.risks[0].id]
+});
+assert.equal(linked.status, 200);
 
 const duplicate = await request(app).post(scenarioUrl).send({ nome: '  SENHA INCORRETA  ' });
 assert.equal(duplicate.status, 409);
@@ -68,7 +80,20 @@ assert.ok(history.body.every((item) => item.cenarioId === first.body.id && item.
 assert.equal((await request(app).get(wrongScenarioUrl)).body.length, 0);
 const scenarioList = await request(app).get(`/api/tests/${testId}/scenarios`);
 assert.equal(scenarioList.body.find((item) => item.id === first.body.id).ultimoResultado, 'bloqueado');
+assert.equal(scenarioList.body.find((item) => item.id === first.body.id).riskAssessment.analysisId, analysis.body.analysisId);
 assert.equal(scenarioList.body.find((item) => item.id === confirmed.body.id).ultimoResultado, undefined);
+
+const suggestionsPath = `/api/tests/${testId}/security-suggestions`;
+const generatedSuggestions = await request(app).post(suggestionsPath).send({ analysisId: analysis.body.analysisId });
+assert.equal(generatedSuggestions.status, 201);
+assert.equal(generatedSuggestions.body.length, 1);
+const acceptedSuggestion = await request(app).patch(`${suggestionsPath}/${generatedSuggestions.body[0].id}`).send({ status: 'aceita' });
+assert.equal(acceptedSuggestion.status, 200);
+const savedSuggestions = await request(app).get(suggestionsPath);
+assert.equal(savedSuggestions.body[0].status, 'aceita');
+const acceptedScenario = (await request(app).get(`/api/tests/${testId}/scenarios`)).body.find((item) => item.id === acceptedSuggestion.body.scenarioId);
+assert.equal(acceptedScenario.origemCriacao, 'sugestao_automatica');
+assert.equal(acceptedScenario.riskAssessment.risks[0].id, analysis.body.risks[0].id);
 const separateProcess = spawnSync(process.execPath, ['tests/read-history.mjs', testId, first.body.id], {
   cwd: process.cwd(), env: process.env, encoding: 'utf8', timeout: 30000
 });

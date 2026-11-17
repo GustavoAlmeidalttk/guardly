@@ -1,18 +1,24 @@
 import { spawn } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HttpError } from '../middlewares/errors.js';
 
 const defaultWorker = fileURLToPath(new URL('./eslintWorker.js', import.meta.url));
 const MAX_OUTPUT_BYTES = 200_000;
 
-export function runStaticAnalyzer(code, { workerPath = defaultWorker, timeoutMs = 8000 } = {}) {
+export function runStaticAnalyzer(code, { workerPath, timeoutMs = 8000 } = {}) {
+  if (!workerPath && process.env.ANALYZER_MODE !== 'process-dev') {
+    return runContainerAnalyzer(code, timeoutMs);
+  }
   return new Promise((resolve, reject) => {
     const environment = {};
     for (const name of ['SystemRoot', 'WINDIR', 'PATH', 'Path', 'TEMP', 'TMP']) {
       if (process.env[name]) environment[name] = process.env[name];
     }
-    const child = spawn(process.execPath, ['--max-old-space-size=128', workerPath], {
+    const child = spawn(process.execPath, ['--max-old-space-size=128', workerPath || defaultWorker], {
       cwd: tmpdir(), env: environment, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false
     });
     let output = '';
@@ -51,5 +57,37 @@ export function runStaticAnalyzer(code, { workerPath = defaultWorker, timeoutMs 
     });
     child.stdin.on('error', () => {});
     child.stdin.end(JSON.stringify({ code }));
+  });
+}
+
+function runContainerAnalyzer(code, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const dockerBin = process.env.DOCKER_BIN || 'docker';
+    const cidDir = mkdtempSync(join(tmpdir(), 'guardly-container-'));
+    const cidFile = join(cidDir, 'container-id');
+    const cleanup = () => { try { rmSync(cidDir, { recursive: true, force: true }); } catch {} };
+    const stopContainer = () => {
+      try {
+        const containerId = readFileSync(cidFile, 'utf8').trim();
+        if (containerId) spawnSync(dockerBin, ['kill', containerId], { stdio: 'ignore', timeout: 3000, windowsHide: true });
+      } catch {}
+      cleanup();
+    };
+    const child = spawn(process.env.DOCKER_BIN || 'docker', [
+      'run', '--rm', '-i', `--cidfile=${cidFile}`, '--network=none', '--memory=256m', '--cpus=1', '--pids-limit=64',
+      '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--user=65532:65532',
+      '--tmpfs=/tmp:rw,noexec,nosuid,size=16m', process.env.ANALYZER_IMAGE || 'guardly-analyzer:local'
+    ], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true, shell: false });
+    let output = ''; let settled = false;
+    const timer = setTimeout(() => { stopContainer(); child.kill('SIGKILL'); if (!settled) { settled = true; reject(new HttpError(504, 'ANALYSIS_TIMEOUT', 'A análise excedeu o tempo permitido.')); } }, timeoutMs);
+    child.stdout.on('data', (chunk) => { output += chunk.toString(); if (Buffer.byteLength(output) > MAX_OUTPUT_BYTES) child.kill('SIGKILL'); });
+    child.on('error', () => { cleanup(); if (!settled) { settled = true; clearTimeout(timer); reject(new HttpError(503, 'ISOLATION_UNAVAILABLE', 'O ambiente isolado Docker não está disponível.')); } });
+    child.on('close', (status) => {
+      cleanup(); if (settled) return; settled = true; clearTimeout(timer);
+      if (status !== 0) return reject(new HttpError(502, 'ANALYZER_FAILED', 'O contêiner de análise falhou.'));
+      try { const data = JSON.parse(output); if (data.error?.kind === 'PARSE_ERROR') return reject(new HttpError(422, 'ANALYSIS_PARSE_ERROR', `Não foi possível analisar a sintaxe do código na linha ${data.error.line || '?'}.`)); if (!Array.isArray(data.messages)) throw new Error(); resolve(data.messages); }
+      catch { reject(new HttpError(502, 'ANALYZER_FAILED', 'A ferramenta de análise produziu uma resposta inválida.')); }
+    });
+    child.stdin.on('error', () => {}); child.stdin.end(JSON.stringify({ code }));
   });
 }

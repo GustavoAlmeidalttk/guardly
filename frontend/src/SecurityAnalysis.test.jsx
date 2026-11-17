@@ -63,7 +63,7 @@ describe('TES-71/68/7: interface de análise de segurança', () => {
     render(<SecurityAnalysis />);
     await user.type(screen.getByLabelText(/Código para análise/), 'const answer = 2 + 2;');
     await user.click(screen.getByRole('button', { name: 'Analisar código' }));
-    expect(await screen.findByText('Nenhum risco encontrado.')).toBeInTheDocument();
+    expect(await screen.findByText('Nenhum risco identificado pelas regras configuradas')).toBeInTheDocument();
     expect(screen.getByText(/Isso não garante que o código seja seguro/)).toBeInTheDocument();
   });
 

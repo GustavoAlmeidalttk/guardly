@@ -137,6 +137,11 @@ Todas as respostas usam JSON. IDs são UUIDs, mantidos para preservar o contrato
 | GET | `/api/tests` | Lista testes com contagem de cenários |
 | GET | `/api/tests/:id` | Consulta um teste |
 | POST | `/api/tests/:testId/scenarios` | Cadastra cenário |
+| PUT | `/api/tests/:testId/scenarios/:scenarioId/risks` | Associa riscos de uma análise existente ao cenário |
+| GET | `/api/tests/:testId/security-suggestions` | Lista sugestões do teste |
+| POST | `/api/tests/:testId/security-suggestions` | Gera sugestões relacionadas aos riscos de `{ "analysisId": "..." }` |
+| PATCH | `/api/tests/:testId/security-suggestions/:suggestionId` | Aceita ou descarta sugestão; aceite recebe `status: "aceita"` e opcional `scenario` revisado |
+| PUT | `/api/tests/:testId/scenarios/:scenarioId/risks` | Associa riscos de uma análise existente ao cenário |
 | GET | `/api/tests/:testId/scenarios` | Lista cenários do teste |
 | POST | `/api/tests/:testId/scenarios/:scenarioId/executions` | Inicia uma execução e devolve os dados do cenário |
 | PATCH | `/api/tests/:testId/scenarios/:scenarioId/executions/:executionId` | Finaliza uma execução |
@@ -189,7 +194,7 @@ O histórico mostra data e horário, responsável, resultado e evidências. Resu
 
 ### Análise de segurança (Sprint 3)
 
-A aplicação aceita **JavaScript** (`language: "javascript"` ou `"js"`). O código é obrigatório e limitado a **50 KB em UTF-8**. A interface permite indicar que ele foi gerado por IA e informar a ferramenta. O código não é gravado no Firebase, em arquivo temporário ou no relatório exportado.
+A aplicação aceita **JavaScript** (`language: "javascript"` ou `"js"`). O código é obrigatório e limitado a **50 KB em UTF-8**. A interface permite indicar que ele foi gerado por IA e informar a ferramenta. O código-fonte não é persistido: somente metadados e resultados são gravados em `analisesSeguranca/{analysisId}`.
 
 ```json
 {
@@ -224,15 +229,19 @@ Resposta resumida de exemplo:
 }
 ```
 
-O analisador utiliza **ESLint 9** com `eslint-plugin-security 4` e regras nativas `no-eval` e `no-implied-eval`. As regras vêm fixas no backend; o usuário não escolhe configuração nem plugins. A saída `severity: 2` do ESLint é apresentada como **alta** e `severity: 1` como **média**. Essas categorias são uma triagem do projeto, não uma avaliação completa de explorabilidade. A localização vem das linhas e colunas fornecidas pelo ESLint. Não são atribuídas severidades crítica ou baixa quando a ferramenta não as informa.
+O analisador utiliza **ESLint 9** com `eslint-plugin-security 4` e regras nativas `no-eval` e `no-implied-eval`. As regras vêm fixas no backend; o usuário não escolhe configuração nem plugins. A classificação é determinística: `no-eval`/`no-implied-eval` = crítica; regras de processo, caminho de arquivo, require não literal, regex custosa e object injection = alta; avisos do ESLint = baixa; demais erros do ESLint = média. Essa matriz é uma triagem do projeto, não uma avaliação completa de explorabilidade. A localização vem das linhas e colunas fornecidas pelo ESLint.
 
-O `POST` devolve `status: "no_findings"`, `risks: []` e `"Nenhum risco encontrado."` somente quando a ferramenta conclui sem ocorrências. Código vazio retorna `400`, código acima do limite `413`, linguagem não suportada ou sintaxe inválida `422`, falha do analisador `502`, timeout `504` e excesso de análises simultâneas `429`. Nenhum desses erros é apresentado como análise limpa.
+Cada risco retorna `type`, `description`, `severity`, `location`, `ruleId`, `analyzer` e `recommendation` com uma orientação de correção. O `POST` devolve `status: "no_findings"`, `risks: []` e `"Nenhum risco identificado pelas regras configuradas."` somente quando a ferramenta conclui sem ocorrências. O relatório salvo não contém o código enviado. Código vazio retorna `400`, código acima do limite `413`, linguagem não suportada ou sintaxe inválida `422`, falha do analisador `502`, timeout `504` e excesso de análises simultâneas `429`. Nenhum desses erros é apresentado como análise limpa.
 
 O frontend exporta o objeto de resposta em **JSON**, contendo data, linguagem, ferramenta de IA, analisador e riscos, sem o código submetido.
 
 #### Limites de segurança
 
-O analisador roda em **processo Node separado**, com timeout de 8 segundos, limite de memória de 128 MB, limite de saída, até duas análises simultâneas e variáveis de ambiente reduzidas. Ele recebe o código pelo `stdin` e usa apenas o parser e regras estáticas do ESLint; não usa `eval`, não chama o código do usuário e não cria arquivos temporários. O processo separado **não é um sandbox do sistema operacional**: o worker ainda usa a identidade e as permissões de arquivo do servidor. Por isso, esta versão aceita somente JavaScript tratado como dado pelo ESLint. Os achados podem conter falsos positivos e a ausência de achados não comprova segurança completa. Para ampliar linguagens ou usar ferramentas que executem código, será necessário isolamento adicional.
+O modo padrão exige o contêiner Docker (`ANALYZER_MODE=docker` no `backend/.env`). Construa a imagem com `docker build -f backend/Dockerfile.analyzer -t guardly-analyzer:local backend`. O modo aplica rede desabilitada, limites de memória/CPU/PIDs, usuário não privilegiado, filesystem read-only, capacidades removidas, `no-new-privileges`, `/tmp` temporário e timeout de 8 segundos. Se o daemon ou a imagem não estiverem disponíveis, a análise falha com erro explícito. `ANALYZER_MODE=process-dev` habilita o worker legado somente para desenvolvimento/testes controlados; esse modo não é sandbox e não deve ser usado para processar submissões não confiáveis em produção. O build da imagem e a análise controlada em contêiner foram executados neste ambiente. Regras heurísticas de funcionalidades sensíveis e severidades são triagem e podem gerar falsos positivos; ausência de achados não comprova segurança.
+
+Resultados de segurança incluem `sensitiveFeatures`, padrões reconhecidos com categoria e localização, além de IDs estáveis `risk-1`, `risk-2` etc. O painel do cenário permite associar `analysisId` e um ou mais IDs de risco. A análise é salva em `analisesSeguranca`; cenários armazenam `riskAssessment`. A listagem deriva prioridade pela severidade associada; cenários sem associação recebem `sem_avaliacao`.
+
+As sugestões ficam em `testes/{testId}/sugestoesSeguranca/{suggestionId}` e guardam o risco e a análise de origem, rascunho revisável, estado, datas e ID do cenário criado após aceite. O cenário aceito registra `origemCriacao: "sugestao_automatica"`, o ID da sugestão e a análise de origem. O ID da análise aparece no relatório visual e também no JSON exportado. A geração é idempotente por par análise/risco. O painel permite editar os passos antes do aceite e descartar sugestões pendentes.
 
 ## Solução de problemas
 
@@ -253,4 +262,4 @@ TES-54, TES-55, TES-56, TES-60, TES-61, TES-62, TES-17 e TES-15. A execução é
 
 ## Escopo da Sprint 3
 
-TES-66, TES-94, TES-70, TES-71, TES-67, TES-6, TES-68 e TES-7. O módulo usa análise estática local e exportação JSON, sem persistência do código ou histórico de análises. O isolamento de processo e o tratamento do código como dados são as medidas implementadas; não há sandbox de sistema operacional. Nenhum status do Jira é alterado automaticamente.
+TES-66, TES-94, TES-70, TES-71, TES-67, TES-6, TES-68 e TES-7. O código fonte não é persistido; metadados e resultados são salvos em Firestore. O modo Docker é o padrão da API. O modo `process-dev` continua sem sandbox e serve apenas para desenvolvimento/testes locais. Nenhum status do Jira é alterado automaticamente.
